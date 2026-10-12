@@ -11,6 +11,7 @@
 | `DOCUMENTATION.md` | Full application and feature summary |
 | `ROADMAP.md` | Product phases and remaining work |
 | `docs/sheets-production-verification.md` | Checklist for verifying sync against the production workbook |
+| `docs/openclaw/tetra/SKILL.md` | OpenClaw skill: agent API usage (paths, scopes, delete approval flow) |
 
 Recommended order:
 DOCUMENTATION → PRD → ARCHITECTURE → ADRs → DESIGN → AGENTS → README → ROADMAP

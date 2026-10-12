@@ -22,6 +22,7 @@
    - [5.8 Google Calendar Two-Way Integration](#58-google-calendar-two-way-integration)
    - [5.9 Companion Alerts & Intelligent Notifications](#59-companion-alerts--intelligent-notifications)
    - [5.10 Keyboard Shortcuts, PWA & Guided Tour](#510-keyboard-shortcuts-pwa--guided-tour)
+   - [5.11 Agent Access (OpenClaw API)](#511-agent-access-openclaw-api)
 6. [API Architecture & Endpoint Reference](#6-api-architecture--endpoint-reference)
 7. [Environment Configuration & Database Runtime](#7-environment-configuration--database-runtime)
 8. [Testing, Verification & Quality Assurance](#8-testing-verification--quality-assurance)
@@ -120,6 +121,9 @@ erDiagram
     users ||--o{ sync_logs : "records"
     users ||--o{ calendar_configs : "manages"
     users ||--o{ calendar_events : "synchronizes"
+    users ||--o{ api_tokens : "issues"
+    users ||--o{ agent_actions : "audits"
+    api_tokens ||--o{ agent_actions : "performs"
 
     categories ||--o{ tasks : "categorizes"
     categories ||--o{ time_entries : "groups"
@@ -134,7 +138,7 @@ erDiagram
 
 | Table / Enum | Key Fields | Purpose |
 |---|---|---|
-| [`users`](file:///home/noah/project/tetra/src/server/db/schema.ts#L38-L54) | `id`, `email`, `name`, `timezone`, `googleAccessToken`, `googleRefreshToken`, `googleTokenExpiresAt` | User account with OAuth credentials and default IANA timezone. |
+| [`users`](file:///home/noah/project/tetra/src/server/db/schema.ts#L38-L54) | `id`, `email`, `name`, `timezone`, `googleAccessToken`, `googleRefreshToken`, `googleTokenExpiresAt`, `googleScopes` | User account with OAuth credentials, the Google scopes granted at the last sign-in, and default IANA timezone. |
 | [`categories`](file:///home/noah/project/tetra/src/server/db/schema.ts#L56-L61) | `id`, `key` (unique), `name`, `sortOrder` | System-wide official work category definitions. |
 | [`tasks`](file:///home/noah/project/tetra/src/server/db/schema.ts#L63-L83) | `id`, `userId`, `name`, `categoryId`, `status` (`todo`, `in_progress`, `done`), `isFavorite`, `lastUsedAt` | Task entities created or worked on by users. |
 | [`daily_attendance`](file:///home/noah/project/tetra/src/server/db/schema.ts#L85-L115) | `id`, `userId`, `workDate`, `clockInAt`, `clockOutAt`, `status` (`open`, `closed`), `reviewState` (`draft`, `ready`, `reviewed`, `synced`, `changed_after_sync`), `reviewedAt`, `lastSyncedAt` | Daily attendance record containing workday start/end times and verification status. |
@@ -143,6 +147,8 @@ erDiagram
 | [`spreadsheet_configs`](file:///home/noah/project/tetra/src/server/db/schema.ts#L162-L179) | `id`, `userId`, `spreadsheetId`, `worksheetName`, `sheetGid`, `mapping` (JSONB), `timezone`, `active` | Coordinate mappings between TETRA fields and Google Sheet columns. |
 | [`sync_logs`](file:///home/noah/project/tetra/src/server/db/schema.ts#L181-L198) | `id`, `userId`, `workDate`, `spreadsheetConfigId`, `status` (`pending`, `success`, `failed`), `payloadHash`, `changedCells` (JSONB), `errorMessage` | Audit log of every synchronization attempt and exact cells modified. |
 | [`calendar_configs`](file:///home/noah/project/tetra/src/server/db/schema.ts#L200-L216) | `id`, `userId`, `calendarId`, `calendarName`, `syncEnabled`, `categoryRules` (JSONB), `lastSyncAt` | User settings for Google Calendar sync and auto-categorization rules. |
+| [`api_tokens`](file:///home/noah/project/tetra/src/server/db/schema.ts) | `id`, `userId`, `name`, `tokenHash` (sha256, unique), `tokenPrefix`, `scopes` (`read`/`write`/`delete`), `expiresAt`, `revokedAt`, `lastUsedAt` | Hashed, revocable bearer tokens for the agent API. Plaintext is never stored. |
+| [`agent_actions`](file:///home/noah/project/tetra/src/server/db/schema.ts) | `id`, `userId`, `tokenId`, `kind`, `targetType`, `targetId`, `summary` (JSONB), `reason`, `status` (`agent_action_status`: `pending`, `executing`, `executed`, `failed`, `rejected`, `expired`), `result` (JSONB), `expiresAt`, `claimedAt`, `resolvedAt` | Audit trail of every agent write and the pending-delete approval queue (one row per action). A partial unique index allows one `pending` row per target. |
 | [`calendar_events`](file:///home/noah/project/tetra/src/server/db/schema.ts#L218-L251) | `id`, `userId`, `googleEventId`, `title`, `description`, `categoryId`, `startAt`, `endAt`, `allDay`, `meetUrl`, `guests` (JSONB), `sendUpdates` | Cached/synchronized Google Calendar events with category predictions. |
 
 ---
@@ -292,6 +298,10 @@ Located at route [`/calendar`](file:///home/noah/project/tetra/src/app/(app)/cal
 - **Full Event CRUD with Meet & Guests**: Create and edit events with Google Meet generation, guest email invitations, and customizable update notification options (`sendUpdates: "all" | "none"`).
 - **Rule-Based Auto-Categorization**: Automatically maps incoming events to TETRA categories using customizable regex rules against titles and descriptions, presence of Google Meet links, and guest counts.
 - **1-Click Import to Time Entries**: Convert scheduled calendar meetings into completed TETRA time entries with pre-filled category and duration.
+- **Calendar Write Scope (one-time re-consent)**: Creating, editing and deleting events in Google requires the `https://www.googleapis.com/auth/calendar.events` scope (`calendar.readonly` is still requested for the calendar list). The granted scopes are stored on `users.google_scopes` at sign-in, and `canWriteGoogle` in the calendar config is true only when `calendar.events` or `calendar` is granted (exact match). Existing users must **sign out and sign back in once** (Google shows the consent screen on every sign-in) before edits reach Google; until then writes are saved in TETRA only and the API reports `google: { synced: false, error: "missing_scope" }`. Settings shows "Reconnect Google (sign out and in) to enable calendar edits" in that state.
+- **Google Cloud Console step**: add `https://www.googleapis.com/auth/calendar.events` (a sensitive scope) to the OAuth consent screen's scopes for the project, and re-submit verification if the app is published. Without it Google will not grant the scope at sign-in.
+- **Sync result**: `POST /api/calendar/events`, `PATCH`/`DELETE /api/calendar/events/:id` additionally return `google: { synced, error }` where `error` is `missing_scope`, `not_linked`, or the Google error message. A Google 404/410 on delete counts as synced.
+- **Agent calendar writes**: the agent API (section 5.11) uses the same services and returns the same `google: { synced, error }` object, so the same one-time re-consent and console step apply. An approved agent delete of a Google-linked event while `canWriteGoogle` is false removes the event only in TETRA; the approval card warns that it will come back on the next calendar sync.
 
 ---
 
@@ -305,6 +315,8 @@ TETRA evaluates companion alerts across six operational rules:
 4. **Timeline Gap Warning**: Flags untracked spans exceeding 15 minutes between consecutive tasks.
 5. **Weekly Target Deficit**: Warns on Thursdays and Fridays when cumulative work hours fall significantly behind the 40-hour weekly target.
 6. **Unsynced Previous Day**: Reminds the user each morning if the previous workday's review has not been synchronized to Google Sheets.
+
+A seventh, non-rule alert lists **agent delete requests waiting for approval** (`agent_approval`, "Agent wants to delete ...", linking to `/settings/agent`); it is emitted even when today has no attendance and disappears once the request is approved, rejected or expired. The bell refreshes alerts on mount, when opened, and every 60 s while the tab is visible; dismissed alerts stay dismissed for the rest of the day.
 
 Alerts are delivered via the Header Notification Bell dropdown (`NotificationMenu`), toast overlays (`NotificationBannerOverlay`), browser desktop notifications, and optional audio chimes.
 
@@ -338,9 +350,37 @@ Alerts are delivered via the Header Notification Bell dropdown (`NotificationMen
 
 ---
 
+### 5.11 Agent Access (OpenClaw API)
+Implemented in [`src/features/agent-api/`](file:///home/noah/project/tetra/src/features/agent-api/), routes under [`src/app/api/agent/`](file:///home/noah/project/tetra/src/app/api/agent/), managed at `/settings/agent` ([`agent-access-view.tsx`](file:///home/noah/project/tetra/src/components/settings/agent-access-view.tsx)). Decision record: [ADR 0009](file:///home/noah/project/tetra/docs/adr/0009-agent-api-approval.md). The OpenClaw skill that calls this API is [`docs/openclaw/tetra/SKILL.md`](file:///home/noah/project/tetra/docs/openclaw/tetra/SKILL.md).
+
+A personal agent (OpenClaw) can read and change the user's TETRA data over HTTP with a bearer token:
+
+- **Tokens**: created in **Settings → Agent access** (`/settings/agent`) with a name, scopes and an optional expiry (1–365 days; none by default). The plaintext (`tetra_...`) is shown **once**; store it as `TETRA_API_TOKEN` in the agent's environment together with `TETRA_BASE_URL` (agent-side variables, not TETRA server env). TETRA stores only a sha256 hash and a display prefix. Scopes: `read` (default), `write`, `delete`; `write` and `delete` each imply `read`. Revoking a token takes effect on the next request and expires that token's pending delete requests (`result.code: "token_revoked"`). `last_used_at` is updated at most once a minute.
+- **Reads** (`read` scope) need no approval and are not audited: day summary, tasks (with `today | overdue | in_progress | upcoming | open | all` filters in the user's timezone), schedule, time entries, calendar events, attendance, categories.
+- **Creates and updates** (`write` scope) apply immediately; the agent is expected to confirm with the user in chat first (TETRA does not enforce this). They cover tasks, manual time entries, timer start/stop/pause/resume, calendar events, clock-in/clock-out, attendance time edits and breaks. Every write is recorded in `agent_actions` as `executed` or `failed`; validation errors (400) are not recorded.
+- **Deletes** (`delete` scope) never run directly. `DELETE /api/agent/<resource>/:id` returns **202** with a pending action (`approvePath: "/settings/agent"`); the user approves or rejects it in **Settings → Agent access → Pending approvals**, and the bell shows an "Agent wants to delete ..." alert. Requests expire after 24 h by default (`expiresInMinutes`, 1–1440, may shorten this). The agent polls `GET /api/agent/actions/:id` for the outcome: `executed`, `rejected`, `expired`, or `failed` with `result.code` one of `gone`, `stale`, `timeout`, `token_revoked`, `expired`, `execution_error`, `sync_error`.
+- **Staleness check**: the approval card shows the live impact (for tasks, how many entries and minutes are deleted with it and whether the timer is running; for calendar events, Google link, guest notifications and the read-only Google warning) and a "Changed since request" warning. Approve sends the fingerprint the card displayed; if the target changed after that, the delete fails with `stale` instead of running.
+- **Timestamps and dates**: agent timestamps must include an offset (`Z` or `+07:00`); naive timestamps are rejected. Task due dates are sent as `dueDate: YYYY-MM-DD` (the user's local date); `dueAt` is rejected. Day keys (`date`) are always the user's local day, never the server's.
+- **Sheet sync after agent writes**: entry, break and timer-stop writes, and approved entry/break deletes, sync the affected days to the Google Sheet with the same gating as Timeline auto-sync (`autoSyncTasks`, not in file mode), sequentially under a 20 s budget; the result is returned as `sheetSync`. Timer start/pause/resume and break start do not sync. **Approved task deletes never sync**: the affected days are listed in `result.needsSync` and show "Not synced" until the user syncs them. Agent clock-out and attendance edits that close a day reuse the clock-out auto-sync (which marks the day reviewed; see ADR 0009); a sync failure never fails the clock-out itself. Calendar writes never touch the sheet.
+- **DISABLE_AUTH**: while `DISABLE_AUTH` (or `NEXT_PUBLIC_DISABLE_AUTH`) is on, every `/api/agent/*` request, token management and approve/reject return **403 `auth_bypass`**, and `/settings/agent` shows "Agent access is disabled while DISABLE_AUTH is on".
+- **ALLOW_DEV_LOGIN warning**: with dev login enabled, anyone who can reach the app can sign in as any email, mint tokens and approve deletes for that user. It is a development-only flag and **must be off in production**; `/settings/agent` shows a warning banner while it is on.
+- **Calendar writes** need the `calendar.events` scope and a one-time Google sign-out/sign-in, plus the Google Cloud console step; see section 5.8.
+- **Errors**: `401 invalid_token`, `403 insufficient_scope`, `403 auth_bypass`, `404 not_found`, `409 conflict` (overlapping entries, with `details`), `400 bad_request`, `500 internal_error` (unexpected failure; generic message, detail only in server logs). Every agent response carries `Cache-Control: no-store`.
+
+#### Deploy and rollback (migration 0008)
+1. **Never run `pnpm db:migrate` bare** during development: it loads `.env.local`, whose `DATABASE_URL` may be the shared remote Postgres. Pass an explicit local target, e.g. `DATABASE_URL=file:.data/m8-check pnpm db:migrate`.
+2. In the Google Cloud console, add `https://www.googleapis.com/auth/calendar.events` to the OAuth consent screen (and re-submit verification if the app is published) **before** deploying the code, otherwise sign-ins that request it fail.
+3. Pre-apply check against the target database: `SELECT max(created_at) FROM drizzle.__drizzle_migrations;` must return `1789500000000` (migration 0007). Anything else means the target is not at the expected revision; stop and investigate. Then, with explicit approval, apply `drizzle/0008_agent_api.sql` to production first: `DATABASE_URL=<prod> pnpm db:migrate`. It is additive (one enum, two tables, the nullable `users.google_scopes` column, one partial unique index), so the old code keeps working.
+4. Deploy the code. The order matters: the new code selects `users.google_scopes`, so deploying it before the migration breaks sign-in and every Google call.
+5. Each user signs out and back in once to grant calendar writes.
+
+Rollback: revert the code deploy first (the old code ignores the new tables and column). Only if needed, run the down statements at the top of `drizzle/0008_agent_api.sql` by hand. They include `DELETE FROM drizzle.__drizzle_migrations WHERE created_at = 1791800000000;`, without which the migrator considers 0008 applied and will never re-run it. Remove the idx 8 entry from `drizzle/meta/_journal.json` only if the migration file itself is also being dropped. Never drop the column while the new code is live.
+
+---
+
 ## 6. API Architecture & Endpoint Reference
 
-All mutation endpoints are validated using Zod schemas and require an authenticated session.
+All mutation endpoints are validated using Zod schemas and require an authenticated session, except the agent API, which uses bearer tokens (section 5.11).
 
 ### Attendance & Breaks
 | Method | Endpoint | Description |
@@ -396,6 +436,39 @@ All mutation endpoints are validated using Zod schemas and require an authentica
 | `POST` | `/api/calendar/import` | Batch-import calendar events into completed time entries. |
 | `GET` | `/api/notifications` | Fetch active companion alerts and system notifications. |
 
+### Agent API (bearer token, `/api/agent/*`)
+Requests send `Authorization: Bearer <token>`; session cookies are not accepted here. Scope in brackets.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/agent/summary` | [read] Today in the user's timezone: attendance, active entry, totals, task buckets, schedule, warnings, `needsSync`. |
+| `GET` | `/api/agent/tasks?filter=&days=&limit=` | [read] Filtered task list. |
+| `GET` | `/api/agent/tasks/:id` | [read] One task. |
+| `GET` | `/api/agent/schedule?date=` | [read] Day attendance, breaks, time entries, events, totals, review state. |
+| `GET` | `/api/agent/time-entries?date=`, `/api/agent/time-entries/active` | [read] Day entries; running entry. |
+| `GET` | `/api/agent/calendar/events?date=` or `?from=&to=` (`&sync=true`) | [read] Events; Google is queried only with `sync=true`. |
+| `GET` | `/api/agent/attendance?date=`, `/api/agent/categories` | [read] Attendance; categories. |
+| `GET` | `/api/agent/actions?status=&limit=`, `/api/agent/actions/:id` | [read] List or poll agent actions. |
+| `POST`/`PATCH` | `/api/agent/tasks`, `/api/agent/tasks/:id` | [write] Create/update a task (`categoryKey` or `categoryId`, `dueDate`). |
+| `POST`/`PATCH` | `/api/agent/time-entries`, `/api/agent/time-entries/:id` | [write] Manual entry create/update. |
+| `POST` | `/api/agent/time-entries/{start,stop,pause,resume}` | [write] Timer operations. |
+| `POST`/`PATCH` | `/api/agent/calendar/events`, `/api/agent/calendar/events/:id` | [write] Event create/update; returns `google: { synced, error }`. |
+| `POST` | `/api/agent/attendance/clock-in`, `/api/agent/attendance/clock-out` | [write] Clock in/out. |
+| `PATCH` | `/api/agent/attendance/:date` | [write] Adjust clock-in/clock-out. |
+| `POST`/`PATCH` | `/api/agent/breaks`, `/api/agent/breaks/start`, `/api/agent/breaks/stop`, `/api/agent/breaks/:id` | [write] Breaks. |
+| `DELETE` | `/api/agent/{tasks,time-entries,calendar/events,breaks}/:id` | [delete] Request a delete; returns 202 with a pending action. |
+
+### Agent access management (session cookie)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET`/`POST` | `/api/api-tokens` | List tokens; create a token (plaintext returned once). |
+| `DELETE` | `/api/api-tokens/:id` | Revoke a token (expires its pending deletes). |
+| `GET` | `/api/agent-actions?status=&limit=` | Agent actions with live impact and staleness for pending rows. |
+| `POST` | `/api/agent-actions/:id/approve` | Approve a pending delete (`{ expectedFingerprint }`). |
+| `POST` | `/api/agent-actions/:id/reject` | Reject a pending delete. |
+
+All of these return 403 `auth_bypass` while `DISABLE_AUTH` is on.
+
 ---
 
 ## 7. Environment Configuration & Database Runtime
@@ -409,7 +482,7 @@ All environment variables are validated at startup via [`src/server/env.ts`](fil
 | `NEXTAUTH_URL` | Optional | Canonical URL of the application | `http://localhost:3000` |
 | `GOOGLE_CLIENT_ID` | Optional | Google OAuth 2.0 Client ID for Sheets/Calendar APIs | - |
 | `GOOGLE_CLIENT_SECRET` | Optional | Google OAuth 2.0 Client Secret | - |
-| `ALLOW_DEV_LOGIN` | Optional | Enable local passwordless mock authentication | `true` in development |
+| `ALLOW_DEV_LOGIN` | Optional | Enable local passwordless mock authentication. Development only: anyone can then sign in as any email and mint agent tokens; must be off in production | `true` in development |
 | `DEFAULT_TIMEZONE` | Optional | Fallback IANA timezone | `Asia/Jakarta` |
 
 ### Dual Database Setup

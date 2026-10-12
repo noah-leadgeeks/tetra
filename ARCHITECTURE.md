@@ -3,16 +3,18 @@
 ## System shape
 
 ```text
-Employee
-   ↓
+Employee                      Personal agent (OpenClaw)
+   ↓ session cookie              ↓ Authorization: Bearer <token>
 Next.js Web App
-   ├── UI
+   ├── UI (incl. /settings/agent approvals)
    ├── Server Actions / Route Handlers
+   │      └── /api/agent/*  (bearer auth, scopes, deletes → pending approval)
    └── Domain Services
           ├── Attendance
           ├── Activities
           ├── Daily Summary
-          └── Sheets Sync
+          ├── Sheets Sync
+          └── Agent API (tokens, agent_actions)
    ↓
 PostgreSQL
 
@@ -57,7 +59,8 @@ src/
 │   ├── attendance/
 │   ├── activities/
 │   ├── daily-summary/
-│   └── sheets-sync/
+│   ├── sheets-sync/
+│   └── agent-api/
 ├── server/
 │   ├── db/
 │   ├── auth/
@@ -85,6 +88,10 @@ Category
 
 SpreadsheetConfig
  └── SyncLog
+
+User
+ ├── ApiToken
+ └── AgentAction (→ ApiToken, nullable)
 ```
 
 ### TimeEntry
@@ -139,6 +146,49 @@ changedCells
 errorMessage
 createdAt
 ```
+
+### ApiToken (`api_tokens`)
+
+```text
+id
+userId
+name
+tokenHash        sha256 of the plaintext, unique; plaintext is never stored
+tokenPrefix      display only
+scopes           text[]: read | write | delete (non-empty)
+expiresAt
+revokedAt
+lastUsedAt       throttled to one write per minute
+createdAt
+```
+
+### AgentAction (`agent_actions`)
+
+```text
+id
+userId
+tokenId          set null when the token row is deleted
+kind             e.g. task.update, time_entry.delete
+targetType       task | time_entry | calendar_event | break | attendance
+targetId
+summary          JSONB: label, sanitized request, fingerprint, dayKeys, impact
+reason
+status           pending | executing | executed | failed | rejected | expired
+result           JSONB: code, error, google, sheetSync, needsSync
+expiresAt        required when pending
+claimedAt        required when executing
+resolvedAt
+createdAt
+```
+
+One table is both the audit log of agent writes and the approval queue for agent deletes. A partial unique index on `(user_id, target_type, target_id) WHERE status = 'pending'` keeps one pending request per target. Expired `pending` rows and `executing` rows claimed more than 5 minutes ago are swept lazily whenever actions are listed, polled, approved or rejected (no cron).
+
+## Agent API
+
+- `/api/agent/*` is a separate namespace from the UI routes. It authenticates only with `Authorization: Bearer <token>` (no cookie fallback) through `withAgentAuth(scope, handler)` in `src/features/agent-api/http.ts`, and calls the same domain services as the UI routes.
+- Reads need `read`; creates and updates need `write` and apply directly; deletes need `delete` and only create a `pending` action that the user approves or rejects in `/settings/agent` (session routes `/api/agent-actions/*`). Approval claims `pending → executing` atomically, re-checks the target fingerprint against the one the user saw, deletes, then records `executed` or `failed`. See ADR-0009.
+- Agent access, token management and approvals refuse with 403 `auth_bypass` while `DISABLE_AUTH` is on.
+- Agent entry/break/timer-stop writes and approved entry/break deletes sync the affected days through `syncDaysAfterChange` (`src/features/sheets-sync/auto-sync-server.ts`) with the Timeline auto-sync gating. Approved task deletes do not sync; their days stay `changed_after_sync`.
 
 ## Source of truth
 
@@ -240,6 +290,12 @@ DELETE /api/time-entries/:id
 GET  /api/days/:date
 POST /api/days/:date/review
 POST /api/days/:date/sync
+
+GET    /api/agent/summary                 (Bearer, read)
+POST   /api/agent/tasks                   (Bearer, write)
+DELETE /api/agent/tasks/:id               (Bearer, delete → 202 pending)
+GET    /api/agent/actions/:id             (Bearer, read; poll)
+POST   /api/agent-actions/:id/approve     (session)
 ```
 
 ## Security
@@ -248,7 +304,9 @@ POST /api/days/:date/sync
 - Validate every mutation with Zod.
 - Authorize every record by user.
 - Audit spreadsheet writes.
-- Do not log OAuth tokens.
+- Do not log OAuth tokens or agent API tokens; store agent tokens only as sha256 hashes.
+- Agent deletes always require in-app approval; agent access is off under `DISABLE_AUTH`.
+- `ALLOW_DEV_LOGIN` is development only (anyone can sign in as any email and mint agent tokens).
 - Do not collect unnecessary monitoring data.
 
 ## Failure handling
