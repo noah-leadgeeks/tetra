@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildAgentApprovalAlerts,
   calculateUnreadCount,
   collapseMissingDayAlerts,
   createNotification,
@@ -551,5 +552,47 @@ describe("Notifications domain logic", () => {
       const odd = alert("alert-missing-day-1", "missing_day");
       expect(collapseMissingDayAlerts([odd])).toEqual([{ ids: ["alert-missing-day-1"], alert: odd }]);
     });
+  });
+});
+
+describe("buildAgentApprovalAlerts", () => {
+  const now = new Date("2026-09-10T12:00:00Z");
+
+  it("builds a warning alert for a pending task delete", () => {
+    const [alert] = buildAgentApprovalAlerts(
+      [
+        {
+          id: "abc",
+          status: "pending",
+          reason: "duplicate task",
+          expiresAt: "2026-09-10T14:10:00Z",
+          summary: { label: "Old task" },
+          live: { label: "Old task", impact: { entryCount: 3, totalMinutes: 130 } },
+        },
+      ],
+      now,
+    );
+    expect(alert).toMatchObject({
+      id: "alert-agent-action-abc",
+      type: "agent_approval",
+      severity: "warning",
+      title: "Agent wants to delete Old task",
+      href: "/settings/agent",
+      actionLabel: "Review",
+      read: false,
+    });
+    expect(alert.message).toBe("3 entries, 2h 10m; expires in 2h 10m. agent says: duplicate task");
+  });
+
+  it("falls back to the request summary and skips non-pending actions", () => {
+    const alerts = buildAgentApprovalAlerts(
+      [
+        { id: "a", status: "pending", reason: null, expiresAt: null, summary: { label: "X", impact: { minutes: 45 } }, live: null },
+        { id: "b", status: "executed", reason: null, expiresAt: null, summary: { label: "Y" } },
+      ],
+      now,
+    );
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].message).toBe("45m");
   });
 });

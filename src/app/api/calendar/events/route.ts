@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { z } from "zod";
 
+import { createEventSchema } from "@/features/calendar-sync/event-schemas";
 import {
   createCalendarEvent,
   getCalendarSchedule,
@@ -8,26 +8,6 @@ import {
 } from "@/features/calendar-sync/service";
 import { todayKey } from "@/lib/time";
 import { auth } from "@/server/auth";
-
-const guestSchema = z.union([
-  z.string().email(),
-  z.object({
-    email: z.string().email(),
-    displayName: z.string().optional(),
-  }),
-]);
-
-const createEventSchema = z.object({
-  title: z.string().trim().min(1, "Title is required").max(500),
-  description: z.string().nullable().optional(),
-  categoryId: z.string().uuid().nullable().optional(),
-  startAt: z.string().min(1, "Start time is required"),
-  endAt: z.string().min(1, "End time is required"),
-  allDay: z.boolean().optional(),
-  guests: z.array(guestSchema).optional(),
-  createMeet: z.boolean().optional(),
-  sendUpdates: z.enum(["all", "none"]).optional(),
-});
 
 export async function GET(request: Request) {
   const session = await auth();
@@ -100,8 +80,8 @@ export async function POST(request: Request) {
       );
     }
 
-    const event = await createCalendarEvent(session.user.id, parsed.data, timeZone);
-    return NextResponse.json({ event }, { status: 201 });
+    const { event, google } = await createCalendarEvent(session.user.id, parsed.data, timeZone);
+    return NextResponse.json({ event, google }, { status: 201 });
   } catch (err) {
     console.error("Failed to create calendar event:", err);
     return NextResponse.json(

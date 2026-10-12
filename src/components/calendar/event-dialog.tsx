@@ -28,7 +28,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { CategoryBadge } from "@/components/ui/category-badge";
-import type { CalendarEventDTO } from "@/features/calendar-sync/types";
+import type { CalendarEventDTO, GoogleSyncResult } from "@/features/calendar-sync/types";
 import { cn } from "@/lib/utils";
 
 interface CategoryOption {
@@ -43,8 +43,22 @@ interface EventDialogProps {
   event?: CalendarEventDTO | null;
   initialDate?: string; // YYYY-MM-DD
   categories?: CategoryOption[];
+  /** False when the user never connected Google: no Google warning is shown then. */
+  hasGoogleAuth?: boolean;
   onSaved?: (event: CalendarEventDTO) => void;
   onDeleted?: (eventId: string) => void;
+}
+
+function warnIfGoogleNotSynced(google: GoogleSyncResult | undefined, hasGoogleAuth: boolean) {
+  // Users without Google auth have nothing to sync; the warning would be noise.
+  if (!hasGoogleAuth || !google || google.synced || !google.error) return;
+  toast.warning(
+    google.error === "missing_scope"
+      ? "Saved in TETRA only. Reconnect Google (sign out and in) to enable calendar edits."
+      : google.error === "not_linked"
+        ? "Saved in TETRA only. This event is not linked to Google Calendar."
+        : `Saved in TETRA, but Google Calendar was not updated: ${google.error}`,
+  );
 }
 
 export function EventDialog(props: EventDialogProps) {
@@ -64,6 +78,7 @@ function EventDialogInner({
   event,
   initialDate,
   categories: initialCategories,
+  hasGoogleAuth = true,
   onSaved,
   onDeleted,
 }: EventDialogProps) {
@@ -224,6 +239,7 @@ function EventDialogInner({
         toast.success("Event updated successfully", {
           description: createMeet && data.event?.meetUrl ? "Google Meet conference updated." : undefined,
         });
+        warnIfGoogleNotSynced(data.google, hasGoogleAuth);
         onSaved?.(data.event);
         onOpenChange(false);
       } else {
@@ -242,6 +258,7 @@ function EventDialogInner({
         toast.success("Event created successfully", {
           description: createMeet && data.event?.meetUrl ? "Google Meet link generated." : undefined,
         });
+        warnIfGoogleNotSynced(data.google, hasGoogleAuth);
         onSaved?.(data.event);
         onOpenChange(false);
       }
@@ -272,7 +289,9 @@ function EventDialogInner({
         throw new Error(data.error || "Failed to delete event");
       }
 
+      const data = (await res.json().catch(() => ({}))) as { google?: GoogleSyncResult };
       toast.success("Event deleted");
+      warnIfGoogleNotSynced(data.google, hasGoogleAuth);
       onDeleted?.(event.id);
       onOpenChange(false);
     } catch (err) {

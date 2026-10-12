@@ -1,14 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { breakPatchSchema as patchSchema } from "@/features/attendance/break-schemas";
 import { deleteBreak, updateBreak } from "@/features/attendance/service";
 import { auth } from "@/server/auth";
 
 const idSchema = z.uuid();
-
-const patchSchema = z.object({
-  startedAt: z.iso.datetime().optional(),
-  endedAt: z.iso.datetime().optional(),
-});
 
 /** PATCH /api/breaks/:id — edit a break entry. */
 export async function PATCH(

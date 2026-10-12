@@ -20,7 +20,7 @@ export default async function CalendarPage() {
 
   return (
     <div className="container mx-auto px-4 py-6 max-w-6xl">
-      <CalendarView timezone={timeZone} />
+      <CalendarView timezone={timeZone} hasGoogleAuth={session.hasGoogleAuth ?? false} />
     </div>
   );
 }

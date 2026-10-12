@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  dismissAlerts,
   sendBrowserAlert,
   syncCompanionAlerts,
 } from "./store";
@@ -162,5 +163,102 @@ describe("Notifications Store & Browser Alerts", () => {
         body: "You have 45m unlogged",
       }),
     );
+  });
+  const makeAlert = (
+    id: string,
+    type: string,
+    severity: TetraNotification["severity"] = "warning",
+  ): TetraNotification => ({
+    id,
+    type: type as TetraNotification["type"],
+    severity,
+    title: `Title ${id}`,
+    message: `Message ${id}`,
+    timestamp: new Date().toISOString(),
+    read: false,
+    href: "/timeline",
+  });
+
+  const enableBrowserAlerts = () => {
+    const mockConstructor = vi.fn();
+    // @ts-expect-error mock Notification
+    globalThis.Notification = mockConstructor;
+    // @ts-expect-error mock permission
+    globalThis.Notification.permission = "granted";
+    mockLocalStorage.setItem("tetra_browser_notifications_v1", "true");
+    Object.defineProperty(globalThis, "navigator", {
+      value: {},
+      writable: true,
+      configurable: true,
+    });
+    return mockConstructor;
+  };
+
+  const storedIds = () =>
+    JSON.parse(mockLocalStorage.getItem("tetra_notifications_v1") ?? "[]").map(
+      (n: TetraNotification) => n.id,
+    );
+
+  it("keeps a dismissed alert absent across later syncs", () => {
+    const alert = makeAlert("alert-dismiss-1", "gap");
+    syncCompanionAlerts([alert]);
+    expect(storedIds()).toContain("alert-dismiss-1");
+
+    dismissAlerts(["alert-dismiss-1"]);
+    expect(storedIds()).not.toContain("alert-dismiss-1");
+
+    syncCompanionAlerts([alert], { source: "poll" });
+    expect(storedIds()).not.toContain("alert-dismiss-1");
+  });
+
+  it("does not record non-alert ids as dismissed", () => {
+    dismissAlerts(["notif-123"]);
+    expect(mockLocalStorage.getItem("tetra_dismissed_alerts_v1")).toBeNull();
+  });
+
+  it("clears the dismissed set when the day key changes", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(2026, 9, 12, 10, 0, 0));
+      const alert = makeAlert("alert-day-1", "gap");
+      dismissAlerts([alert.id]);
+      syncCompanionAlerts([alert]);
+      expect(storedIds()).not.toContain("alert-day-1");
+
+      vi.setSystemTime(new Date(2026, 9, 13, 10, 0, 0));
+      syncCompanionAlerts([alert]);
+      expect(storedIds()).toContain("alert-day-1");
+      dismissAlerts([alert.id]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("on poll, only agent_approval alerts trigger a browser alert", () => {
+    const mockConstructor = enableBrowserAlerts();
+
+    syncCompanionAlerts([makeAlert("alert-poll-gap", "gap")], { source: "poll" });
+    expect(mockConstructor).not.toHaveBeenCalled();
+
+    syncCompanionAlerts([makeAlert("alert-poll-approval", "agent_approval")], {
+      source: "poll",
+    });
+    expect(mockConstructor).toHaveBeenCalledTimes(1);
+    expect(mockConstructor).toHaveBeenCalledWith(
+      "TETRA · Title alert-poll-approval",
+      expect.anything(),
+    );
+    dismissAlerts(["alert-poll-gap", "alert-poll-approval"]);
+  });
+
+  it("on manual sync, both gap and agent_approval alerts trigger browser alerts", () => {
+    const mockConstructor = enableBrowserAlerts();
+
+    syncCompanionAlerts([makeAlert("alert-man-gap", "gap")], { source: "manual" });
+    syncCompanionAlerts([makeAlert("alert-man-approval", "agent_approval")], {
+      source: "manual",
+    });
+    expect(mockConstructor).toHaveBeenCalledTimes(2);
+    dismissAlerts(["alert-man-gap", "alert-man-approval"]);
   });
 });

@@ -9,25 +9,10 @@ import {
   parseJsonBody,
   unauthorized,
 } from "@/features/activities/api";
+import { manualEntrySchema } from "@/features/activities/entry-schemas";
 import { createManualEntry, getDayEntries } from "@/features/activities/service";
 
 const dayParamSchema = z.iso.date();
-
-const manualEntrySchema = z
-  .object({
-    startedAt: z.iso.datetime(),
-    endedAt: z.iso.datetime(),
-    taskName: z.string().trim().min(1),
-    categoryId: z.uuid(),
-    notes: z.string().optional(),
-  })
-  .refine(
-    (data) => new Date(data.endedAt).getTime() > new Date(data.startedAt).getTime(),
-    {
-      error: "End time must be after start time",
-      path: ["endedAt"],
-    },
-  );
 
 /** GET /api/time-entries?day=YYYY-MM-DD — entries for the user's day. */
 export async function GET(request: Request) {

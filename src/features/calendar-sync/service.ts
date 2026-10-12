@@ -33,6 +33,7 @@ import type {
   CalendarEventSuggestionDTO,
   CalendarGuestDTO,
   CalendarItemDTO,
+  GoogleSyncResult,
   CreateCalendarEventInput,
   ImportCalendarEventsInputDTO,
   ImportCalendarEventsResultDTO,
@@ -43,6 +44,28 @@ import type {
 const DEDUPE_WINDOW_MS = 120_000;
 
 
+const CALENDAR_WRITE_SCOPES = [
+  "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/calendar",
+];
+
+/** Exact scope membership (never substring: calendar.readonly must not match). */
+export function hasCalendarWriteScope(scopes: string | null | undefined): boolean {
+  const granted = (scopes ?? "").split(/\s+/).filter(Boolean);
+  return CALENDAR_WRITE_SCOPES.some((scope) => granted.includes(scope));
+}
+
+/** Why a Google write cannot be attempted, or null when it can. */
+function googleWriteBlocker(config: CalendarConfigDTO): string | null {
+  if (!config.hasGoogleAuth) return "not_linked";
+  if (!config.canWriteGoogle) return "missing_scope";
+  return null;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : "Google Calendar request failed";
+}
+
 /**
  * Retrieves user's calendar configuration or default values.
  */
@@ -52,6 +75,7 @@ export async function getCalendarConfig(userId: string): Promise<CalendarConfigD
       id: users.id,
       googleAccessToken: users.googleAccessToken,
       googleRefreshToken: users.googleRefreshToken,
+      googleScopes: users.googleScopes,
     })
     .from(users)
     .where(eq(users.id, userId))
@@ -60,6 +84,7 @@ export async function getCalendarConfig(userId: string): Promise<CalendarConfigD
   const hasGoogleAuth = !!(
     userRows[0]?.googleAccessToken || userRows[0]?.googleRefreshToken
   );
+  const canWriteGoogle = hasGoogleAuth && hasCalendarWriteScope(userRows[0]?.googleScopes);
 
   let config = undefined;
   try {
@@ -83,6 +108,7 @@ export async function getCalendarConfig(userId: string): Promise<CalendarConfigD
       categoryRules: null,
       lastSyncAt: null,
       hasGoogleAuth,
+      canWriteGoogle,
     };
   }
 
@@ -95,6 +121,7 @@ export async function getCalendarConfig(userId: string): Promise<CalendarConfigD
     categoryRules: config.categoryRules as CalendarConfigDTO["categoryRules"],
     lastSyncAt: config.lastSyncAt ? config.lastSyncAt.toISOString() : null,
     hasGoogleAuth,
+    canWriteGoogle,
   };
 }
 
@@ -589,7 +616,7 @@ export async function createCalendarEvent(
   userId: string,
   input: CreateCalendarEventInput,
   timeZone: string,
-): Promise<CalendarEventDTO> {
+): Promise<{ event: CalendarEventDTO; google: GoogleSyncResult }> {
   const startDate = new Date(input.startAt);
   const endDate = new Date(input.endAt);
 
@@ -611,8 +638,9 @@ export async function createCalendarEvent(
       : { email: g.email, displayName: g.displayName || null, responseStatus: null },
   );
 
-  // If user has Google OAuth, create in Google Calendar
-  if (config.hasGoogleAuth) {
+  // Only attempt Google when the user is linked AND granted a write scope
+  const google: GoogleSyncResult = { synced: false, error: googleWriteBlocker(config) };
+  if (google.error === null) {
     try {
       const googleRes = await createGoogleCalendarEvent({
         userId,
@@ -635,9 +663,13 @@ export async function createCalendarEvent(
         if (googleRes.guests.length > 0) {
           guests = googleRes.guests;
         }
+        google.synced = true;
+      } else {
+        google.error = "not_linked";
       }
     } catch (err) {
       console.error("Failed to create Google Calendar event via API:", err);
+      google.error = errorMessage(err);
     }
   }
 
@@ -675,7 +707,7 @@ export async function createCalendarEvent(
     }
   }
 
-  return {
+  const event: CalendarEventDTO = {
     id: created.id,
     userId: created.userId,
     title: created.title,
@@ -696,6 +728,7 @@ export async function createCalendarEvent(
     createdAt: created.createdAt.toISOString(),
     updatedAt: created.updatedAt.toISOString(),
   };
+  return { event, google };
 }
 
 /**
@@ -706,7 +739,7 @@ export async function updateCalendarEvent(
   eventId: string,
   input: UpdateCalendarEventInput,
   timeZone: string,
-): Promise<CalendarEventDTO> {
+): Promise<{ event: CalendarEventDTO; google: GoogleSyncResult }> {
   const existingRows = await db
     .select()
     .from(calendarEvents)
@@ -735,7 +768,13 @@ export async function updateCalendarEvent(
       )
     : (existing.guests as CalendarGuestDTO[]) || [];
 
-  if (existing.googleEventId) {
+  const google: GoogleSyncResult = { synced: false, error: null };
+  if (!existing.googleEventId) {
+    google.error = "not_linked";
+  } else {
+    google.error = googleWriteBlocker(await getCalendarConfig(userId));
+  }
+  if (existing.googleEventId && google.error === null) {
     try {
       const googleRes = await patchGoogleCalendarEvent({
         userId,
@@ -749,7 +788,8 @@ export async function updateCalendarEvent(
         timeZone,
         createMeet: input.createMeet,
         guests: input.guests,
-        sendUpdates: input.sendUpdates,
+        // Fall back to the stored preference, never Google's "all" default.
+        sendUpdates: input.sendUpdates ?? ((existing.sendUpdates as "all" | "none") || "all"),
       });
 
       if (googleRes) {
@@ -758,9 +798,13 @@ export async function updateCalendarEvent(
         if (googleRes.guests && googleRes.guests.length > 0) {
           guests = googleRes.guests;
         }
+        google.synced = true;
+      } else {
+        google.error = "not_linked";
       }
     } catch (err) {
       console.error("Failed to patch Google Calendar event:", err);
+      google.error = errorMessage(err);
     }
   }
 
@@ -796,7 +840,7 @@ export async function updateCalendarEvent(
     }
   }
 
-  return {
+  const event: CalendarEventDTO = {
     id: updated.id,
     userId: updated.userId,
     title: updated.title,
@@ -817,12 +861,16 @@ export async function updateCalendarEvent(
     createdAt: updated.createdAt.toISOString(),
     updatedAt: updated.updatedAt.toISOString(),
   };
+  return { event, google };
 }
 
 /**
  * Deletes a calendar event from TETRA and Google Calendar.
  */
-export async function deleteCalendarEvent(userId: string, eventId: string): Promise<boolean> {
+export async function deleteCalendarEvent(
+  userId: string,
+  eventId: string,
+): Promise<{ deleted: boolean; google: GoogleSyncResult }> {
   const existingRows = await db
     .select()
     .from(calendarEvents)
@@ -831,22 +879,32 @@ export async function deleteCalendarEvent(userId: string, eventId: string): Prom
 
   const existing = existingRows[0];
   if (!existing) {
-    return false;
+    return { deleted: false, google: { synced: false, error: null } };
   }
 
-  if (existing.googleEventId) {
+  const google: GoogleSyncResult = { synced: false, error: null };
+  if (!existing.googleEventId) {
+    google.error = "not_linked";
+  } else {
+    google.error = googleWriteBlocker(await getCalendarConfig(userId));
+  }
+  if (existing.googleEventId && google.error === null) {
     try {
-      await deleteGoogleCalendarEvent({
+      const res = await deleteGoogleCalendarEvent({
         userId,
         calendarId: existing.calendarId,
         googleEventId: existing.googleEventId,
+        sendUpdates: (existing.sendUpdates as "all" | "none") || "all",
       });
+      google.synced = res.ok;
+      google.error = res.ok ? null : res.error;
     } catch (err) {
       console.error("Failed to delete event from Google Calendar:", err);
+      google.error = errorMessage(err);
     }
   }
 
   await db.delete(calendarEvents).where(eq(calendarEvents.id, eventId));
-  return true;
+  return { deleted: true, google };
 }
 

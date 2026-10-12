@@ -32,6 +32,14 @@ export interface CalendarConfigDTO {
   categoryRules: CalendarRuleDTO[] | null;
   lastSyncAt: string | null;
   hasGoogleAuth: boolean;
+  /** Linked to Google AND granted a calendar write scope (calendar.events or calendar). */
+  canWriteGoogle: boolean;
+}
+
+/** Explicit outcome of a Google Calendar write. error: "missing_scope" | "not_linked" | Google message. */
+export interface GoogleSyncResult {
+  synced: boolean;
+  error: string | null;
 }
 
 export interface CalendarItemDTO {

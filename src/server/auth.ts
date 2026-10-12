@@ -9,7 +9,7 @@ import { users } from "@/server/db/schema";
 import { env } from "@/server/env";
 
 /** Find-or-create the user row for an authenticated identity. */
-async function upsertUser(input: {
+export async function upsertUser(input: {
   name: string;
   email: string;
   image?: string | null;
@@ -17,6 +17,8 @@ async function upsertUser(input: {
   googleAccessToken?: string | null;
   googleRefreshToken?: string | null;
   googleTokenExpiresAt?: Date | null;
+  /** Space-separated scopes granted by Google; undefined leaves the stored value untouched. */
+  googleScopes?: string | null;
 }): Promise<{
   id: string;
   name: string;
@@ -38,6 +40,7 @@ async function upsertUser(input: {
       googleAccessToken: string | null;
       googleRefreshToken: string | null;
       googleTokenExpiresAt: Date | null;
+      googleScopes: string | null;
     }> = {};
     if (input.googleId && u.googleId !== input.googleId) {
       updates.googleId = input.googleId;
@@ -56,6 +59,9 @@ async function upsertUser(input: {
     }
     if (input.googleTokenExpiresAt !== undefined) {
       updates.googleTokenExpiresAt = input.googleTokenExpiresAt;
+    }
+    if (input.googleScopes !== undefined) {
+      updates.googleScopes = input.googleScopes;
     }
     if (Object.keys(updates).length > 0) {
       await db.update(users).set(updates).where(eq(users.id, u.id));
@@ -78,6 +84,7 @@ async function upsertUser(input: {
       googleAccessToken: input.googleAccessToken ?? null,
       googleRefreshToken: input.googleRefreshToken ?? null,
       googleTokenExpiresAt: input.googleTokenExpiresAt ?? null,
+      googleScopes: input.googleScopes ?? null,
       timezone: env.DEFAULT_TIMEZONE,
     })
     .returning();
@@ -103,7 +110,7 @@ if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
           access_type: "offline",
           response_type: "code",
           scope:
-            "openid email profile https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar.readonly",
+            "openid email profile https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events",
         },
       },
     }),
@@ -256,6 +263,7 @@ const nextAuth = NextAuth({
               isGoogle && account.expires_at
                 ? new Date(account.expires_at * 1000)
                 : undefined,
+            googleScopes: isGoogle ? (account.scope ?? null) : undefined,
           });
           token.userId = u.id;
           token.timezone = u.timezone;
@@ -391,14 +399,19 @@ async function getBypassSession(): Promise<import("next-auth").Session | null> {
   };
 }
 
-export const auth = (async (
-  ...args: Parameters<typeof nextAuth.auth>
-): Promise<import("next-auth").Session | null> => {
-  if (
+/** True when DISABLE_AUTH makes auth() return a synthetic session. Single definition. */
+export function isAuthBypassActive(): boolean {
+  return (
     process.env.DISABLE_AUTH === "true" ||
     process.env.NEXT_PUBLIC_DISABLE_AUTH === "true" ||
     env.DISABLE_AUTH === true
-  ) {
+  );
+}
+
+export const auth = (async (
+  ...args: Parameters<typeof nextAuth.auth>
+): Promise<import("next-auth").Session | null> => {
+  if (isAuthBypassActive()) {
     const session = await getBypassSession();
     if (session) return session;
   }

@@ -39,7 +39,7 @@ beforeEach(() => {
 });
 
 async function giveGoogleAuth(userId: string) {
-  await testDb.update(users).set({ googleRefreshToken: "refresh" }).where(eq(users.id, userId));
+  await testDb.update(users).set({ googleRefreshToken: "refresh", googleScopes: "openid https://www.googleapis.com/auth/calendar.events" }).where(eq(users.id, userId));
 }
 
 describe("calendar config", () => {
@@ -67,7 +67,7 @@ describe("local event CRUD without Google auth", () => {
 
   it("create persists locally and never calls Google", async () => {
     const { userId, categoryId } = await seedBasics();
-    const dto = await createCalendarEvent(userId, { ...input, categoryId, guests: ["a@x.com"] }, TZ);
+    const { event: dto } = await createCalendarEvent(userId, { ...input, categoryId, guests: ["a@x.com"] }, TZ);
     expect(google.createGoogleCalendarEvent).not.toHaveBeenCalled();
     expect(dto).toMatchObject({ title: "Standup", googleEventId: null, categoryId, status: "confirmed" });
     expect(dto.categoryName).toBe("Development");
@@ -85,8 +85,8 @@ describe("local event CRUD without Google auth", () => {
   it("update changes provided fields, keeps others, and rejects bad ranges / foreign events", async () => {
     const a = await seedBasics();
     const b = await seedBasics();
-    const dto = await createCalendarEvent(a.userId, input, TZ);
-    const updated = await updateCalendarEvent(a.userId, dto.id, { title: "Retro" }, TZ);
+    const { event: dto } = await createCalendarEvent(a.userId, input, TZ);
+    const { event: updated } = await updateCalendarEvent(a.userId, dto.id, { title: "Retro" }, TZ);
     expect(updated.title).toBe("Retro");
     expect(updated.startAt).toBe(dto.startAt);
     await expect(
@@ -99,10 +99,10 @@ describe("local event CRUD without Google auth", () => {
   it("delete removes own event, returns false for unknown/foreign", async () => {
     const a = await seedBasics();
     const b = await seedBasics();
-    const dto = await createCalendarEvent(a.userId, input, TZ);
-    expect(await deleteCalendarEvent(b.userId, dto.id)).toBe(false);
+    const { event: dto } = await createCalendarEvent(a.userId, input, TZ);
+    expect((await deleteCalendarEvent(b.userId, dto.id)).deleted).toBe(false);
     expect(await testDb.select().from(calendarEvents)).toHaveLength(1);
-    expect(await deleteCalendarEvent(a.userId, dto.id)).toBe(true);
+    expect((await deleteCalendarEvent(a.userId, dto.id)).deleted).toBe(true);
     expect(await testDb.select().from(calendarEvents)).toHaveLength(0);
     expect(google.deleteGoogleCalendarEvent).not.toHaveBeenCalled();
   });
@@ -119,7 +119,7 @@ describe("Google-connected event CRUD (Google layer mocked)", () => {
       status: "confirmed",
       guests: [{ email: "a@x.com", displayName: "A", responseStatus: "needsAction" }],
     });
-    const dto = await createCalendarEvent(
+    const { event: dto } = await createCalendarEvent(
       userId,
       { title: "Sync", startAt: "2026-01-05T02:00:00Z", endAt: "2026-01-05T03:00:00Z", createMeet: true, guests: ["a@x.com"] },
       TZ,
@@ -138,13 +138,14 @@ describe("Google-connected event CRUD (Google layer mocked)", () => {
     const { userId } = await seedBasics();
     await giveGoogleAuth(userId);
     google.createGoogleCalendarEvent.mockRejectedValue(new Error("boom"));
-    const dto = await createCalendarEvent(userId, { title: "X", startAt: "2026-01-05T02:00:00Z", endAt: "2026-01-05T03:00:00Z" }, TZ);
+    const { event: dto } = await createCalendarEvent(userId, { title: "X", startAt: "2026-01-05T02:00:00Z", endAt: "2026-01-05T03:00:00Z" }, TZ);
     expect(dto.googleEventId).toBeNull();
     expect(await testDb.select().from(calendarEvents)).toHaveLength(1);
   });
 
   it("update patches Google for linked events and keeps local data when it fails", async () => {
     const { userId } = await seedBasics();
+    await giveGoogleAuth(userId);
     const [evt] = await testDb
       .insert(calendarEvents)
       .values({ userId, googleEventId: "g1", title: "Old", startAt: new Date("2026-01-05T02:00:00Z"), endAt: new Date("2026-01-05T03:00:00Z") })
@@ -152,22 +153,23 @@ describe("Google-connected event CRUD (Google layer mocked)", () => {
     google.patchGoogleCalendarEvent.mockResolvedValueOnce({
       googleEventId: "g1", meetUrl: "https://meet.google.com/aaa-bbbb-ccc", htmlLink: "https://cal/g1", status: "confirmed", guests: [],
     });
-    const updated = await updateCalendarEvent(userId, evt.id, { title: "New" }, TZ);
+    const { event: updated } = await updateCalendarEvent(userId, evt.id, { title: "New" }, TZ);
     expect(google.patchGoogleCalendarEvent).toHaveBeenCalledWith(expect.objectContaining({ googleEventId: "g1", title: "New" }));
     expect(updated.meetUrl).toBe("https://meet.google.com/aaa-bbbb-ccc");
     google.patchGoogleCalendarEvent.mockRejectedValueOnce(new Error("down"));
-    const again = await updateCalendarEvent(userId, evt.id, { title: "Newer" }, TZ);
+    const { event: again } = await updateCalendarEvent(userId, evt.id, { title: "Newer" }, TZ);
     expect(again.title).toBe("Newer");
   });
 
   it("delete calls Google for linked events and still deletes locally on Google failure", async () => {
     const { userId } = await seedBasics();
+    await giveGoogleAuth(userId);
     const [evt] = await testDb
       .insert(calendarEvents)
       .values({ userId, googleEventId: "g1", title: "T", startAt: new Date(), endAt: new Date() })
       .returning();
     google.deleteGoogleCalendarEvent.mockRejectedValue(new Error("down"));
-    expect(await deleteCalendarEvent(userId, evt.id)).toBe(true);
+    expect((await deleteCalendarEvent(userId, evt.id)).deleted).toBe(true);
     expect(google.deleteGoogleCalendarEvent).toHaveBeenCalledWith(expect.objectContaining({ googleEventId: "g1" }));
     expect(await testDb.select().from(calendarEvents)).toHaveLength(0);
   });

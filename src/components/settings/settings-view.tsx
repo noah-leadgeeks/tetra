@@ -7,6 +7,7 @@
  */
 import { useEffect, useState } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import { toast } from "sonner";
 
 import {
@@ -906,6 +907,20 @@ export function SettingsView({
         </Card>
 
         <NotificationsSettingsCard />
+
+        <Card className="shadow-xs border-border/80">
+          <CardHeader>
+            <CardTitle>Agent access</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            <p className="text-xs text-muted-foreground">
+              Manage API tokens and approve deletes requested by an agent.
+            </p>
+            <Button asChild variant="outline" size="sm">
+              <Link href="/settings/agent">Open agent access</Link>
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     </div>
   </div>

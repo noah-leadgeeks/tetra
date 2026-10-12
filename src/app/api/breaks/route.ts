@@ -1,22 +1,7 @@
 import { NextResponse } from "next/server";
-import { z } from "zod";
+import { manualBreakSchema } from "@/features/attendance/break-schemas";
 import { createManualBreak } from "@/features/attendance/service";
 import { auth } from "@/server/auth";
-
-const manualBreakSchema = z
-  .object({
-    workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    startedAt: z.iso.datetime(),
-    endedAt: z.iso.datetime(),
-  })
-  .refine(
-    (data) =>
-      new Date(data.endedAt).getTime() > new Date(data.startedAt).getTime(),
-    {
-      error: "End time must be after start time",
-      path: ["endedAt"],
-    },
-  );
 
 /** POST /api/breaks — create a manual (backfilled) break entry. */
 export async function POST(request: Request): Promise<Response> {

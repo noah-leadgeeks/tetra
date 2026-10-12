@@ -189,6 +189,12 @@ export function CalendarSettingsCard() {
               </div>
             )}
 
+            {isConnected && config && !config.canWriteGoogle && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3.5 text-xs text-muted-foreground">
+                Reconnect Google (sign out and in) to enable calendar edits
+              </div>
+            )}
+
             {!isConnected && (
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3.5 text-xs text-muted-foreground">
                 <p className="font-semibold text-foreground mb-1">

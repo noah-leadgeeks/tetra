@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { z } from "zod";
 import {
   badRequest,
   errorResponse,
@@ -8,13 +7,8 @@ import {
   parseJsonBody,
   unauthorized,
 } from "@/features/activities/api";
+import { startSchema } from "@/features/activities/entry-schemas";
 import { startTimer } from "@/features/activities/service";
-
-const startSchema = z.object({
-  taskName: z.string().trim().min(1),
-  categoryId: z.uuid(),
-  notes: z.string().optional(),
-});
 
 /** POST /api/time-entries/start — start a timer (auto-stops any running one). */
 export async function POST(request: Request) {

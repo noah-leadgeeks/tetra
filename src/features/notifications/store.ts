@@ -6,6 +6,10 @@ import type { TetraNotification } from "./types";
 
 const STORAGE_KEY = "tetra_notifications_v1";
 const BROWSER_NOTIF_KEY = "tetra_browser_notifications_v1";
+const DISMISSED_ALERTS_KEY = "tetra_dismissed_alerts_v1";
+const ALERT_ID_PREFIX = "alert-";
+
+export type AlertSyncSource = "poll" | "manual";
 
 const INITIAL_NOTIFICATIONS: TetraNotification[] = [];
 
@@ -331,7 +335,60 @@ export function emitNotification(
   );
 }
 
-export function syncCompanionAlerts(serverAlerts: TetraNotification[]): void {
+function localDayKey(): string {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+function readDismissedAlertIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(DISMISSED_ALERTS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as { dayKey?: unknown; ids?: unknown };
+    if (parsed.dayKey !== localDayKey() || !Array.isArray(parsed.ids)) {
+      return new Set();
+    }
+    return new Set(parsed.ids.filter((id): id is string => typeof id === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function recordDismissedAlertIds(ids: string[]): void {
+  const alertIds = ids.filter((id) => id.startsWith(ALERT_ID_PREFIX));
+  if (alertIds.length === 0) return;
+  try {
+    const merged = new Set([...readDismissedAlertIds(), ...alertIds]);
+    localStorage.setItem(
+      DISMISSED_ALERTS_KEY,
+      JSON.stringify({ dayKey: localDayKey(), ids: [...merged] }),
+    );
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+/**
+ * Removes notifications by id and remembers dismissed server alerts
+ * (`alert-*`) for the rest of the local day so polling does not resurrect them.
+ */
+export function dismissAlerts(ids: string[]): void {
+  if (typeof window === "undefined") return;
+  const idSet = new Set(ids);
+  recordDismissedAlertIds(ids);
+  const current = getNotificationsSnapshot();
+  setStoredNotifications(current.filter((n) => !idSet.has(n.id)));
+}
+
+export function syncCompanionAlerts(
+  incoming: TetraNotification[],
+  { source = "manual" }: { source?: AlertSyncSource } = {},
+): void {
+  const dismissed = readDismissedAlertIds();
+  const serverAlerts =
+    dismissed.size > 0 ? incoming.filter((a) => !dismissed.has(a.id)) : incoming;
   const current = cleanLegacySpam(getNotificationsSnapshot());
   const existingIds = new Set(current.map((n) => n.id));
   const updated = mergeCompanionAlerts(current, serverAlerts);
@@ -348,7 +405,8 @@ export function syncCompanionAlerts(serverAlerts: TetraNotification[]): void {
       (a) =>
         !existingIds.has(a.id) &&
         !a.read &&
-        (a.severity === "warning" || a.severity === "reminder"),
+        (a.severity === "warning" || a.severity === "reminder") &&
+        (source !== "poll" || a.type === "agent_approval"),
     );
     if (newAlerts.length > 0) {
       const first = newAlerts[0];
@@ -405,21 +463,21 @@ export function useNotifications() {
   }, []);
 
   const removeNotification = useCallback((id: string) => {
-    const current = getNotificationsSnapshot();
-    setStoredNotifications(current.filter((n) => n.id !== id));
+    dismissAlerts([id]);
   }, []);
 
   const clearAll = useCallback(() => {
+    dismissAlerts(getNotificationsSnapshot().map((n) => n.id));
     setStoredNotifications([]);
   }, []);
 
-  const refreshAlerts = useCallback(async () => {
+  const refreshAlerts = useCallback(async (opts?: { source?: AlertSyncSource }) => {
     try {
       const res = await fetch("/api/notifications");
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.notifications)) {
-          syncCompanionAlerts(data.notifications);
+          syncCompanionAlerts(data.notifications, { source: opts?.source ?? "manual" });
         }
       }
     } catch {

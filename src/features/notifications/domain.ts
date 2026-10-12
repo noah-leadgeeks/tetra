@@ -317,6 +317,80 @@ export function generateCompanionAlerts(context: CompanionAlertContext): TetraNo
   return alerts;
 }
 
+/** Minimal shape of a pending agent action needed to build its approval alert. */
+export interface PendingAgentActionInput {
+  id: string;
+  status: string;
+  reason: string | null;
+  expiresAt: string | null;
+  summary: { label?: string; impact?: Record<string, unknown> } & Record<string, unknown>;
+  live?: { label: string; impact: Record<string, unknown> } | null;
+}
+
+function formatMinutes(total: number): string {
+  const h = Math.floor(total / 60);
+  const m = Math.round(total % 60);
+  if (h === 0) return `${m}m`;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+function describeAgentImpact(impact: Record<string, unknown>): string | null {
+  const parts: string[] = [];
+  if (typeof impact.entryCount === "number") {
+    const n = impact.entryCount;
+    let text = `${n} ${n === 1 ? "entry" : "entries"}`;
+    if (typeof impact.totalMinutes === "number") text += `, ${formatMinutes(impact.totalMinutes)}`;
+    parts.push(text);
+  } else if (typeof impact.minutes === "number") {
+    parts.push(formatMinutes(impact.minutes));
+  }
+  if (impact.activeEntry === true) parts.push("includes the running timer");
+  if (impact.googleLinked === true) parts.push("linked to Google");
+  if (impact.notifiesGuests === true && typeof impact.guestCount === "number") {
+    parts.push(`notifies ${impact.guestCount} guest${impact.guestCount === 1 ? "" : "s"}`);
+  }
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
+function describeExpiry(expiresAt: string | null, now: Date): string | null {
+  if (!expiresAt) return null;
+  const minutes = Math.floor((new Date(expiresAt).getTime() - now.getTime()) / 60_000);
+  if (Number.isNaN(minutes)) return null;
+  return minutes <= 0 ? "expires now" : `expires in ${formatMinutes(minutes)}`;
+}
+
+/**
+ * Builds one `alert-agent-action-<id>` warning per pending agent delete.
+ * Alerts are regenerated per fetch, so resolved actions disappear on their own.
+ */
+export function buildAgentApprovalAlerts(
+  actions: readonly PendingAgentActionInput[],
+  now: Date = new Date(),
+): TetraNotification[] {
+  return actions
+    .filter((a) => a.status === "pending")
+    .map((a) => {
+      const label = a.live?.label ?? a.summary.label ?? "an item";
+      const impact = describeAgentImpact(a.live?.impact ?? a.summary.impact ?? {});
+      const parts = [impact, describeExpiry(a.expiresAt, now)].filter(
+        (p): p is string => p !== null,
+      );
+      let message = parts.join("; ");
+      if (a.reason) message += `${message ? ". " : ""}agent says: ${a.reason}`;
+      return {
+        id: `alert-agent-action-${a.id}`,
+        type: "agent_approval" as const,
+        severity: "warning" as const,
+        title: `Agent wants to delete ${label}`,
+        message,
+        timestamp: now.toISOString(),
+        read: false,
+        href: "/settings/agent",
+        actionLabel: "Review",
+      };
+    });
+}
+
 /** Pins the id format produced by `generateCompanionAlerts` for missing days. */
 export const MISSING_DAY_ALERT_ID_PATTERN = /^alert-missing-day-(\d{4}-\d{2}-\d{2})$/;
 

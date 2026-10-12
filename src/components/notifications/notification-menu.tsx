@@ -13,6 +13,7 @@ import {
   ExternalLink,
   Info,
   Layers,
+  ShieldAlert,
   Sparkles,
   Target,
   Trash2,
@@ -36,6 +37,7 @@ import { useNotifications } from "@/features/notifications/store";
 import { formatRelativeTime } from "@/features/notifications/domain";
 import type { TetraNotification } from "@/features/notifications/types";
 import { todayKey } from "@/lib/time";
+import { startNotificationPolling } from "@/features/notifications/polling";
 
 function getNotificationIcon(notification: TetraNotification) {
   switch (notification.type) {
@@ -55,6 +57,8 @@ function getNotificationIcon(notification: TetraNotification) {
       return <Layers className="size-4 text-sky-600 dark:text-sky-400" />;
     case "timer":
       return <TriangleAlert className="size-4 text-amber-600 dark:text-amber-400" />;
+    case "agent_approval":
+      return <ShieldAlert className="size-4 text-amber-600 dark:text-amber-400" />;
     default:
       return <Info className="size-4 text-muted-foreground" />;
   }
@@ -88,6 +92,16 @@ export function NotificationMenu({ timezone = "Asia/Jakarta" }: NotificationMenu
 
   useEffect(() => {
     void refreshAlerts();
+    return startNotificationPolling(() => refreshAlerts({ source: "poll" }), {
+      isVisible: () => document.visibilityState === "visible",
+      subscribeVisibility: (cb) => {
+        const handler = () => {
+          if (document.visibilityState === "visible") cb();
+        };
+        document.addEventListener("visibilitychange", handler);
+        return () => document.removeEventListener("visibilitychange", handler);
+      },
+    });
   }, [refreshAlerts]);
 
   useEffect(() => {

@@ -59,6 +59,8 @@ export async function createMigratedDb() {
 }
 
 const TABLES = [
+  "agent_actions",
+  "api_tokens",
   "calendar_events",
   "calendar_configs",
   "sync_logs",

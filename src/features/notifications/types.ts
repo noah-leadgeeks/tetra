@@ -7,7 +7,8 @@ export type NotificationType =
   | "gap"
   | "meeting"
   | "missing_day"
-  | "weekly_target";
+  | "weekly_target"
+  | "agent_approval";
 
 export type NotificationSeverity =
   | "info"

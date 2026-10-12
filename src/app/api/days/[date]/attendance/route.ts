@@ -1,13 +1,11 @@
-import { and, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { updateAttendanceTimes } from "@/features/attendance/service";
-import { setReviewed } from "@/features/daily-summary/service";
-import { getSheetsClient } from "@/features/sheets-sync/google";
-import { executeSync, getSyncConfig } from "@/features/sheets-sync/service";
+import {
+  autoSyncAfterClose,
+  type CloseAutoSyncResult,
+} from "@/features/sheets-sync/auto-sync-server";
 import { auth } from "@/server/auth";
-import { db } from "@/server/db";
-import { dailyAttendance } from "@/server/db/schema";
 
 const dateParamSchema = z
   .string()
@@ -68,60 +66,14 @@ export async function POST(
     );
 
     // Auto-sync if closing attendance and autoSyncOnClockOut is enabled
-    let autoSyncResult: {
-      attempted: boolean;
-      success?: boolean;
-      idempotent?: boolean;
-      changedCount?: number;
-      message?: string;
-    } = { attempted: false };
-
-    if (attendance.status === "closed") {
-      const config = await getSyncConfig(userId);
-      if (config && config.mapping.autoSyncOnClockOut !== false) {
-        const sheets = await getSheetsClient({
-          userId,
-          accessToken: session?.accessToken,
-        });
-
-        if (sheets) {
-          try {
-            // Mark reviewed then execute sync
-            await setReviewed(userId, workDate, timezone);
-            const syncRes = await executeSync(userId, workDate, {
-              accessToken: session?.accessToken,
-            });
-            autoSyncResult = {
-              attempted: true,
-              success: true,
-              idempotent: syncRes.idempotent,
-              changedCount: syncRes.changedCells.length,
-            };
-          } catch (syncErr) {
-            console.error("Auto-sync on attendance update failed:", syncErr);
-            await db
-              .update(dailyAttendance)
-              .set({
-                reviewState: "ready",
-                reviewedAt: null,
-                updatedAt: new Date(),
-              })
-              .where(
-                and(
-                  eq(dailyAttendance.userId, userId),
-                  eq(dailyAttendance.workDate, workDate),
-                ),
-              );
-            autoSyncResult = {
-              attempted: true,
-              success: false,
-              message:
-                syncErr instanceof Error ? syncErr.message : "Auto-sync failed",
-            };
-          }
-        }
-      }
-    }
+    const autoSyncResult: CloseAutoSyncResult =
+      attendance.status === "closed"
+        ? await autoSyncAfterClose(userId, workDate, timezone, {
+            accessToken: session?.accessToken,
+            resetStateOnFailure: "ready",
+            logLabel: "Auto-sync on attendance update failed:",
+          })
+        : { attempted: false };
 
     return NextResponse.json({
       attendance,

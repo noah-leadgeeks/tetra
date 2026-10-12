@@ -35,7 +35,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { dueDateKey } from "@/components/tasks/task-dates";
+import { dueDateKey } from "@/lib/task-dates";
 import { TaskModalDialog } from "@/components/tasks/task-dialog";
 import {
   DueDateBadge,

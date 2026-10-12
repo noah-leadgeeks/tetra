@@ -35,6 +35,7 @@ import { cn } from "@/lib/utils";
 
 interface CalendarViewProps {
   timezone?: string;
+  hasGoogleAuth?: boolean;
 }
 
 const RETRY_DELAYS_MS = [1000, 3000];
@@ -50,7 +51,7 @@ const FULL_DAY_NAMES = [
   "Saturday",
 ];
 
-export function CalendarView({ timezone = "Asia/Jakarta" }: CalendarViewProps) {
+export function CalendarView({ timezone = "Asia/Jakarta", hasGoogleAuth = true }: CalendarViewProps) {
   const currentTodayKey = useMemo(() => todayKey(timezone), [timezone]);
   const [selectedDayKey, setSelectedDayKey] = useState<string>(currentTodayKey);
 
@@ -711,6 +712,7 @@ export function CalendarView({ timezone = "Asia/Jakarta" }: CalendarViewProps) {
         onOpenChange={setDialogOpen}
         event={editingEvent}
         initialDate={selectedDayKey}
+        hasGoogleAuth={hasGoogleAuth}
         onSaved={() => refreshEvents(false)}
         onDeleted={() => refreshEvents(false)}
       />

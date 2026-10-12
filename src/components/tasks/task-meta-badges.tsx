@@ -2,7 +2,7 @@
 
 import { AlertTriangle, Calendar, Star } from "lucide-react";
 
-import { dueDateKey, isDueToday, isOverdue } from "@/components/tasks/task-dates";
+import { dueDateKey, isDueToday, isOverdue } from "@/lib/task-dates";
 import { todayKey } from "@/lib/time";
 import type { EntryTaskDetailsDTO, TaskPriority, TaskStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";

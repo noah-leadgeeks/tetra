@@ -1,31 +1,11 @@
 import { NextResponse } from "next/server";
-import { z } from "zod";
 
+import { updateEventSchema } from "@/features/calendar-sync/event-schemas";
 import {
   deleteCalendarEvent,
   updateCalendarEvent,
 } from "@/features/calendar-sync/service";
 import { auth } from "@/server/auth";
-
-const guestSchema = z.union([
-  z.string().email(),
-  z.object({
-    email: z.string().email(),
-    displayName: z.string().optional(),
-  }),
-]);
-
-const updateEventSchema = z.object({
-  title: z.string().trim().min(1, "Title cannot be empty").max(500).optional(),
-  description: z.string().nullable().optional(),
-  categoryId: z.string().uuid().nullable().optional(),
-  startAt: z.string().optional(),
-  endAt: z.string().optional(),
-  allDay: z.boolean().optional(),
-  guests: z.array(guestSchema).optional(),
-  createMeet: z.boolean().optional(),
-  sendUpdates: z.enum(["all", "none"]).optional(),
-});
 
 export async function PATCH(
   request: Request,
@@ -56,8 +36,8 @@ export async function PATCH(
       );
     }
 
-    const event = await updateCalendarEvent(session.user.id, id, parsed.data, timeZone);
-    return NextResponse.json({ event });
+    const { event, google } = await updateCalendarEvent(session.user.id, id, parsed.data, timeZone);
+    return NextResponse.json({ event, google });
   } catch (err) {
     console.error("Failed to update calendar event:", err);
     return NextResponse.json(
@@ -82,11 +62,11 @@ export async function DELETE(
   }
 
   try {
-    const success = await deleteCalendarEvent(session.user.id, id);
-    if (!success) {
+    const { deleted, google } = await deleteCalendarEvent(session.user.id, id);
+    if (!deleted) {
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
     }
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, google });
   } catch (err) {
     console.error("Failed to delete calendar event:", err);
     return NextResponse.json(

@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CategoryBadge } from "@/components/ui/category-badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { isDueToday, isOverdue, dueDateKey } from "@/components/tasks/task-dates";
+import { isDueToday, isOverdue, dueDateKey } from "@/lib/task-dates";
 import { PRIORITY_CONFIG, type CardDensity } from "@/components/tasks/task-constants";
 import { getCategoryTheme } from "@/lib/categories";
 import type { TaskDTO, TaskStatus } from "@/lib/types";

@@ -8,17 +8,10 @@ import {
   parseJsonBody,
   unauthorized,
 } from "@/features/activities/api";
+import { entryPatchSchema as patchSchema } from "@/features/activities/entry-schemas";
 import { deleteEntry, updateEntry } from "@/features/activities/service";
 
 const idSchema = z.uuid();
-
-const patchSchema = z.object({
-  startedAt: z.iso.datetime().optional(),
-  endedAt: z.iso.datetime().optional(),
-  notes: z.string().optional(),
-  categoryId: z.uuid().optional(),
-  taskName: z.string().trim().min(1).optional(),
-});
 
 /** PATCH /api/time-entries/:id — edit an entry; 409 on overlap. */
 export async function PATCH(

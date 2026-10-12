@@ -1,5 +1,7 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   date,
   index,
   integer,
@@ -9,6 +11,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -35,6 +38,15 @@ export const syncStatusEnum = pgEnum("sync_status", [
   "failed",
 ]);
 
+export const agentActionStatusEnum = pgEnum("agent_action_status", [
+  "pending",
+  "executing",
+  "executed",
+  "failed",
+  "rejected",
+  "expired",
+]);
+
 export const users = pgTable("users", {
   id: uuid("id").defaultRandom().primaryKey(),
   googleId: text("google_id").unique(),
@@ -48,6 +60,8 @@ export const users = pgTable("users", {
     withTimezone: true,
     mode: "date",
   }),
+  /** Space-separated OAuth scopes granted at the last Google sign-in. */
+  googleScopes: text("google_scopes"),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
     .notNull()
     .defaultNow(),
@@ -254,3 +268,68 @@ export const calendarEvents = pgTable(
   ],
 );
 
+
+export const apiTokens = pgTable(
+  "api_tokens",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    tokenPrefix: text("token_prefix").notNull(),
+    scopes: text("scopes").array().notNull().default(sql`'{read}'::text[]`),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "date" }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true, mode: "date" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("api_tokens_user_idx").on(t.userId),
+    check("api_tokens_scopes_nonempty", sql`cardinality(${t.scopes}) > 0`),
+  ],
+);
+
+export const agentActions = pgTable(
+  "agent_actions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenId: uuid("token_id").references(() => apiTokens.id, {
+      onDelete: "set null",
+    }),
+    kind: text("kind").notNull(),
+    targetType: text("target_type").notNull(),
+    targetId: uuid("target_id"),
+    summary: jsonb("summary").notNull(),
+    reason: text("reason"),
+    status: agentActionStatusEnum("status").notNull().default("executed"),
+    result: jsonb("result"),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }),
+    claimedAt: timestamp("claimed_at", { withTimezone: true, mode: "date" }),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true, mode: "date" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check(
+      "agent_actions_pending_expires",
+      sql`${t.status} <> 'pending' OR ${t.expiresAt} IS NOT NULL`,
+    ),
+    check(
+      "agent_actions_executing_claimed",
+      sql`${t.status} <> 'executing' OR ${t.claimedAt} IS NOT NULL`,
+    ),
+    index("agent_actions_user_status_idx").on(t.userId, t.status),
+    index("agent_actions_user_created_idx").on(t.userId, t.createdAt),
+    uniqueIndex("agent_actions_pending_target_unique")
+      .on(t.userId, t.targetType, t.targetId)
+      .where(sql`${t.status} = 'pending'`),
+  ],
+);

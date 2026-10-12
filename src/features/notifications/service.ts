@@ -5,7 +5,8 @@ import { getCalendarSchedule } from "@/features/calendar-sync/service";
 import { addDaysISO, todayKey } from "@/lib/time";
 import { db } from "@/server/db";
 import { users } from "@/server/db/schema";
-import { generateCompanionAlerts } from "./domain";
+import { listActions } from "@/features/agent-api/actions";
+import { buildAgentApprovalAlerts, generateCompanionAlerts } from "./domain";
 import type { TetraNotification } from "./types";
 
 /**
@@ -25,7 +26,7 @@ export async function getCompanionAlerts(userId: string): Promise<TetraNotificat
   const yesterdayKey = addDaysISO(currentTodayKey, -1);
   const now = new Date();
 
-  const [daySummary, weekSummary, calendarData, yesterdaySummary] = await Promise.all([
+  const [daySummary, weekSummary, calendarData, yesterdaySummary, pendingActions] = await Promise.all([
     getDaySummary(userId, currentTodayKey, tz).catch((err) => {
       console.warn("Could not fetch daySummary for alerts:", err);
       return null;
@@ -42,10 +43,17 @@ export async function getCompanionAlerts(userId: string): Promise<TetraNotificat
       console.warn("Could not fetch yesterdaySummary for alerts:", err);
       return null;
     }),
+    listActions(userId, { status: "pending" }).catch((err) => {
+      console.warn("Could not fetch pending agent actions for alerts:", err);
+      return null;
+    }),
   ]);
 
+  // Built before the no-daySummary early return so approvals are never hidden.
+  const agentAlerts = pendingActions ? buildAgentApprovalAlerts(pendingActions, now) : [];
+
   if (!daySummary) {
-    return [];
+    return agentAlerts;
   }
 
   const hasUnsyncedYesterday = !!(
@@ -53,7 +61,7 @@ export async function getCompanionAlerts(userId: string): Promise<TetraNotificat
     yesterdaySummary.reviewState !== "synced"
   );
 
-  return generateCompanionAlerts({
+  const companion = generateCompanionAlerts({
     todayKey: currentTodayKey,
     now,
     daySummary,
@@ -62,4 +70,6 @@ export async function getCompanionAlerts(userId: string): Promise<TetraNotificat
     hasUnsyncedYesterday,
     yesterdayKey,
   });
+
+  return [...agentAlerts, ...companion];
 }

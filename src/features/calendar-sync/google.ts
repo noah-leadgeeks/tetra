@@ -450,10 +450,10 @@ export async function deleteGoogleCalendarEvent(options: {
   calendarId?: string;
   googleEventId: string;
   sendUpdates?: "all" | "none";
-}): Promise<boolean> {
+}): Promise<{ ok: boolean; error: string | null; code?: "no_client" | "gone" }> {
   const client = await getCalendarClient({ userId: options.userId });
   if (!client) {
-    return false;
+    return { ok: false, error: "not_linked", code: "no_client" };
   }
 
   try {
@@ -462,10 +462,17 @@ export async function deleteGoogleCalendarEvent(options: {
       eventId: options.googleEventId,
       sendUpdates: options.sendUpdates ?? "all",
     });
-    return true;
+    return { ok: true, error: null };
   } catch (err) {
+    const status = (err as { code?: number; status?: number } | null)?.code ??
+      (err as { status?: number } | null)?.status;
+    if (status === 404 || status === 410) {
+      return { ok: true, error: null, code: "gone" };
+    }
     console.error("Failed to delete Google Calendar event:", err);
-    return false;
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Google Calendar request failed",
+    };
   }
 }
-
