@@ -89,6 +89,12 @@ export function TodayScreen({ timezone, nowIso }: TodayScreenProps) {
     );
   }, [summary]);
 
+  // Distinct tasks with a time entry today; they join Today's Focus.
+  const workedTodayTaskIds = useMemo(
+    () => [...new Set((summary?.timeEntries ?? []).map((entry) => entry.taskId))],
+    [summary],
+  );
+
   useTodayGuards({ activeEntry, isWorking, onBreak, attendance });
 
   const status: StatusTone = !isWorking
@@ -297,6 +303,8 @@ export function TodayScreen({ timezone, nowIso }: TodayScreenProps) {
                 timezone={timezone}
                 onRefreshToday={() => void refresh()}
                 refreshKey={tasksRefreshKey}
+                trackedTaskId={activeEntry?.taskId ?? null}
+                workedTodayTaskIds={workedTodayTaskIds}
               />
 
               {/* Google Calendar Today's Schedule */}

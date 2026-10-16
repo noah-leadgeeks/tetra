@@ -3,12 +3,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
-  AlertCircle,
+  AlertTriangle,
+  ArrowRight,
   ArrowUpRight,
   Check,
   CheckCircle2,
   CheckSquare,
-  Clock,
   Loader2,
   Play,
   Plus,
@@ -17,7 +17,6 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { CategoryBadge } from "@/components/ui/category-badge";
 import {
   Dialog,
   DialogContent,
@@ -35,14 +34,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { dueDateKey } from "@/lib/task-dates";
+import { dueDateKey, isOverdue } from "@/lib/task-dates";
 import { TaskModalDialog } from "@/components/tasks/task-dialog";
 import {
   DueDateBadge,
   FavoriteBadge,
-  PRIORITY_BADGES,
+  PriorityBadge,
 } from "@/components/tasks/task-meta-badges";
-import { TaskNotes } from "@/components/tasks/task-notes";
 import { todayKey, zonedDayKey } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import type { CategoryDTO, TaskDTO, TaskPriority } from "@/lib/types";
@@ -52,65 +50,104 @@ interface TodayTasksCardProps {
   onRefreshToday?: () => void;
   /** Bump to refetch tasks (e.g. after the active task was edited elsewhere). */
   refreshKey?: number;
+  /** Task of the running or paused time entry; always pinned first in the focus list. */
+  trackedTaskId?: string | null;
+  /** Distinct task ids with a time entry today; these join the focus list. */
+  workedTodayTaskIds?: string[];
   className?: string;
 }
 
+/** Max open rows in the focus list; further worked-today / due-today tasks fold into the footer. */
+export const MAX_FOCUS_TASKS = 7;
+/** Max "done today" rows; the rest collapse into a "+N more done today" line. */
+export const MAX_DONE_ROWS = 3;
+
+export interface TodaySummaryCounts {
+  /** Open, non-cancelled, past-due tasks not shown as rows. */
+  overdue: number;
+  /** In-progress tasks not shown as rows and not already counted as overdue. */
+  inProgress: number;
+  /** Capped focus overflow that is neither overdue nor in progress. */
+  other: number;
+}
+
 export interface TodayTasksGrouped {
-  inProgressTasks: TaskDTO[];
-  overdueTasks: TaskDTO[];
-  dueTodayTasks: TaskDTO[];
+  /** Open rows: tracked task, then worked on today, then due today (deduplicated, capped). */
+  focusTasks: TaskDTO[];
+  /** Done-today rows, newest first, capped at MAX_DONE_ROWS. */
   completedTodayTasks: TaskDTO[];
-  allTodayTasks: TaskDTO[];
+  /** Done-today tasks beyond the shown rows. */
+  moreCompletedCount: number;
+  /** Header denominator: shown open focus items + all tasks completed today. */
+  totalCount: number;
+  /** Header numerator: all tasks completed today. */
+  completedCount: number;
+  summary: TodaySummaryCounts;
+}
+
+function isOpenTask(t: TaskDTO): boolean {
+  return t.status !== "done" && t.status !== "cancelled";
 }
 
 export function filterTodayTasks(
   tasks: TaskDTO[],
   timezone: string,
   todayStr: string,
+  trackedTaskId?: string | null,
+  workedTodayTaskIds: readonly string[] = [],
 ): TodayTasksGrouped {
-  const inProgressTasks: TaskDTO[] = [];
-  const overdueTasks: TaskDTO[] = [];
-  const dueTodayTasks: TaskDTO[] = [];
-  const completedTodayTasks: TaskDTO[] = [];
-  const allTodayTasks: TaskDTO[] = [];
+  const candidates: TaskDTO[] = [];
+  const seen = new Set<string>();
+  const add = (t: TaskDTO) => {
+    if (seen.has(t.id)) return;
+    seen.add(t.id);
+    candidates.push(t);
+  };
 
+  const tracked = trackedTaskId
+    ? tasks.find((t) => t.id === trackedTaskId && isOpenTask(t))
+    : undefined;
+  if (tracked) add(tracked);
+  const workedToday = new Set(workedTodayTaskIds);
+  for (const t of tasks) if (isOpenTask(t) && workedToday.has(t.id)) add(t);
+  // Due dates are date-only (`...T23:59:59Z` from the task dialog): never zone-convert.
   for (const t of tasks) {
-    let isToday = false;
-    // Due dates are date-only (`...T23:59:59Z` from the task dialog): never zone-convert.
-    const dueDay = t.dueAt ? dueDateKey(t.dueAt) : null;
-    const completedDay = t.completedAt
-      ? zonedDayKey(new Date(t.completedAt), timezone)
-      : null;
-
-    if (t.status === "done") {
-      if (completedDay === todayStr) {
-        completedTodayTasks.push(t);
-        isToday = true;
-      }
-    } else if (t.status === "in_progress") {
-      inProgressTasks.push(t);
-      isToday = true;
-    } else {
-      if (dueDay === todayStr) {
-        dueTodayTasks.push(t);
-        isToday = true;
-      } else if (dueDay && dueDay < todayStr && t.status !== "cancelled") {
-        overdueTasks.push(t);
-        isToday = true;
-      }
-    }
-
-    if (isToday) {
-      allTodayTasks.push(t);
-    }
+    if (isOpenTask(t) && t.dueAt && dueDateKey(t.dueAt) === todayStr) add(t);
   }
 
+  const focusTasks = candidates.slice(0, MAX_FOCUS_TASKS);
+  const shownIds = new Set(focusTasks.map((t) => t.id));
+  const overflowIds = new Set(candidates.slice(MAX_FOCUS_TASKS).map((t) => t.id));
+
+  const summary: TodaySummaryCounts = { overdue: 0, inProgress: 0, other: 0 };
+  for (const t of tasks) {
+    if (shownIds.has(t.id)) continue;
+    // Overdue wins over in progress so a task is never counted twice.
+    if (isOverdue(t.dueAt, t.status, todayStr)) summary.overdue += 1;
+    else if (t.status === "in_progress") summary.inProgress += 1;
+    else if (overflowIds.has(t.id)) summary.other += 1;
+  }
+
+  const completedAll = tasks
+    .filter(
+      (t) =>
+        t.status === "done" &&
+        t.completedAt &&
+        zonedDayKey(new Date(t.completedAt), timezone) === todayStr,
+    )
+    .sort(
+      (a, b) =>
+        new Date(b.completedAt ?? 0).getTime() -
+        new Date(a.completedAt ?? 0).getTime(),
+    );
+
   return {
-    inProgressTasks,
-    overdueTasks,
-    dueTodayTasks,
-    completedTodayTasks,
-    allTodayTasks,
+    focusTasks,
+    completedTodayTasks: completedAll.slice(0, MAX_DONE_ROWS),
+    moreCompletedCount: Math.max(0, completedAll.length - MAX_DONE_ROWS),
+    totalCount: focusTasks.length + completedAll.length,
+    completedCount: completedAll.length,
+    summary,
   };
 }
 
@@ -118,6 +155,8 @@ export function TodayTasksCard({
   timezone,
   onRefreshToday,
   refreshKey,
+  trackedTaskId,
+  workedTodayTaskIds,
   className,
 }: TodayTasksCardProps) {
   const [tasks, setTasks] = useState<TaskDTO[]>([]);
@@ -195,18 +234,20 @@ export function TodayTasksCard({
   }, []);
 
   const {
-    inProgressTasks,
-    overdueTasks,
-    dueTodayTasks,
+    focusTasks,
     completedTodayTasks,
-    allTodayTasks,
+    moreCompletedCount,
+    totalCount,
+    completedCount,
+    summary,
   } = useMemo(
-    () => filterTodayTasks(tasks, timezone, todayStr),
-    [tasks, timezone, todayStr],
+    () =>
+      filterTodayTasks(tasks, timezone, todayStr, trackedTaskId, workedTodayTaskIds),
+    [tasks, timezone, todayStr, trackedTaskId, workedTodayTaskIds],
   );
 
-  const totalCount = allTodayTasks.length;
-  const completedCount = completedTodayTasks.length;
+  const hasSummary =
+    summary.overdue + summary.inProgress + summary.other > 0;
 
   async function handleToggleDone(task: TaskDTO) {
     const isCompleted = task.status === "done";
@@ -373,14 +414,14 @@ export function TodayTasksCard({
             <Loader2 className="mr-2 size-4 animate-spin" />
             Loading today&apos;s tasks...
           </div>
-        ) : allTodayTasks.length === 0 ? (
+        ) : totalCount === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border/70 py-7 text-center">
             <CheckCircle2 className="size-7 text-muted-foreground/50 mb-2" />
             <p className="text-sm font-medium text-foreground">
-              All caught up for today!
+              Nothing in focus today
             </p>
             <p className="text-xs text-muted-foreground max-w-xs mt-1">
-              No tasks currently in progress or due today. Add a task or pull one from your Kanban backlog.
+              Start a timer or set a due date for today to pin a task here.
             </p>
             <Button
               type="button"
@@ -394,14 +435,12 @@ export function TodayTasksCard({
             </Button>
           </div>
         ) : (
-          <div className="flex flex-col gap-2">
-            {/* 1. In Progress Tasks */}
-            {inProgressTasks.map((task) => (
+          <div className="flex flex-col gap-1.5">
+            {focusTasks.map((task) => (
               <TaskRowItem
                 key={task.id}
                 task={task}
-                badgeLabel="In Progress"
-                badgeClass="border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400"
+                isTracked={task.id === trackedTaskId}
                 actionLoading={actionTaskId === task.id}
                 onToggleDone={() => void handleToggleDone(task)}
                 onStartTimer={() => void handleStartTimer(task)}
@@ -410,45 +449,11 @@ export function TodayTasksCard({
               />
             ))}
 
-            {/* 2. Overdue Tasks */}
-            {overdueTasks.map((task) => (
-              <TaskRowItem
-                key={task.id}
-                task={task}
-                badgeLabel="Overdue"
-                badgeIcon={<AlertCircle className="size-3" />}
-                badgeClass="border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400"
-                actionLoading={actionTaskId === task.id}
-                onToggleDone={() => void handleToggleDone(task)}
-                onStartTimer={() => void handleStartTimer(task)}
-                onOpenTask={() => setOpenTask(task)}
-                timezone={timezone}
-              />
-            ))}
-
-            {/* 3. Due Today Tasks */}
-            {dueTodayTasks.map((task) => (
-              <TaskRowItem
-                key={task.id}
-                task={task}
-                badgeLabel="Due Today"
-                badgeIcon={<Clock className="size-3" />}
-                badgeClass="border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                actionLoading={actionTaskId === task.id}
-                onToggleDone={() => void handleToggleDone(task)}
-                onStartTimer={() => void handleStartTimer(task)}
-                onOpenTask={() => setOpenTask(task)}
-                timezone={timezone}
-              />
-            ))}
-
-            {/* 4. Completed Today Tasks */}
             {completedTodayTasks.map((task) => (
               <TaskRowItem
                 key={task.id}
                 task={task}
-                badgeLabel="Completed"
-                badgeClass="border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                isTracked={false}
                 actionLoading={actionTaskId === task.id}
                 onToggleDone={() => void handleToggleDone(task)}
                 onStartTimer={() => void handleStartTimer(task)}
@@ -456,8 +461,49 @@ export function TodayTasksCard({
                 timezone={timezone}
               />
             ))}
+
+            {moreCompletedCount > 0 ? (
+              <p
+                data-testid="today-more-done"
+                className="px-2 text-xs text-muted-foreground"
+              >
+                +{moreCompletedCount} more done today
+              </p>
+            ) : null}
           </div>
         )}
+
+        {!loading && hasSummary ? (
+          <div
+            data-testid="today-focus-summary"
+            className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/50 pt-3 text-xs text-muted-foreground"
+          >
+            {summary.overdue > 0 ? (
+              <span className="inline-flex items-center gap-1 font-medium text-destructive">
+                <AlertTriangle className="size-3 shrink-0" aria-hidden />
+                {summary.overdue} overdue
+              </span>
+            ) : null}
+            {summary.overdue > 0 && summary.inProgress > 0 ? (
+              <span aria-hidden>·</span>
+            ) : null}
+            {summary.inProgress > 0 ? (
+              <span>{summary.inProgress} more in progress</span>
+            ) : null}
+            {summary.overdue + summary.inProgress > 0 && summary.other > 0 ? (
+              <span aria-hidden>·</span>
+            ) : null}
+            {summary.other > 0 ? <span>{summary.other} more</span> : null}
+            <span aria-hidden>·</span>
+            <Link
+              href="/tasks"
+              className="inline-flex min-h-10 items-center gap-1 font-medium text-foreground hover:underline sm:min-h-0"
+            >
+              View all
+              <ArrowRight className="size-3" aria-hidden />
+            </Link>
+          </div>
+        ) : null}
       </CardContent>
 
       <TaskModalDialog
@@ -577,9 +623,8 @@ export function TodayTasksCard({
 
 interface TaskRowItemProps {
   task: TaskDTO;
-  badgeLabel: string;
-  badgeIcon?: React.ReactNode;
-  badgeClass: string;
+  /** True for the task of the running or paused time entry. */
+  isTracked: boolean;
   actionLoading: boolean;
   onToggleDone: () => void;
   onStartTimer: () => void;
@@ -589,9 +634,7 @@ interface TaskRowItemProps {
 
 function TaskRowItem({
   task,
-  badgeLabel,
-  badgeIcon,
-  badgeClass,
+  isTracked,
   actionLoading,
   onToggleDone,
   onStartTimer,
@@ -599,123 +642,85 @@ function TaskRowItem({
   timezone,
 }: TaskRowItemProps) {
   const isDone = task.status === "done";
-  const isInProgress = task.status === "in_progress";
-  const priority = task.priority ?? "medium";
-  const priorityInfo = PRIORITY_BADGES[priority] ?? PRIORITY_BADGES.medium;
+  const isInProgress = task.status === "in_progress" || isTracked;
 
   return (
+    // Stretched-link row: the title button's ::after covers the row, controls sit above it (z-10).
     <div
       className={cn(
-        "group flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-card p-3 transition-colors hover:bg-muted/40",
+        "group relative flex min-h-11 items-center gap-1 rounded-lg border border-border/60 bg-card pr-1 pl-0.5 transition-colors hover:bg-muted/40",
         isDone && "bg-muted/20 border-border/40 opacity-75",
         isInProgress && "border-blue-500/40 bg-blue-50/30 dark:bg-blue-950/20",
       )}
     >
-      <div className="flex items-center gap-3 min-w-0 flex-1">
-        {/* Tactile accessible checkbox */}
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={isDone}
-          aria-label={isDone ? `Mark "${task.name}" as incomplete` : `Mark "${task.name}" as complete`}
-          onClick={onToggleDone}
-          disabled={actionLoading}
+      {/* Tactile accessible checkbox; the button is the 40px touch target */}
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={isDone}
+        aria-label={isDone ? `Mark "${task.name}" as incomplete` : `Mark "${task.name}" as complete`}
+        onClick={onToggleDone}
+        disabled={actionLoading}
+        className="relative z-10 flex size-10 shrink-0 items-center justify-center rounded-md focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring sm:size-9"
+      >
+        <span
           className={cn(
-            "flex size-5 shrink-0 items-center justify-center rounded border transition-all focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring active:scale-95",
+            "flex size-5 items-center justify-center rounded border transition-all group-active:scale-95",
             isDone
               ? "border-primary bg-primary text-primary-foreground"
-              : "border-muted-foreground/40 hover:border-primary hover:bg-muted/30",
+              : "border-muted-foreground/40 hover:border-primary",
           )}
         >
           {isDone ? <Check className="size-3.5 stroke-[2.5]" /> : null}
-        </button>
+        </span>
+      </button>
 
-        {/* Task name and metadata */}
-        <div className="flex flex-col min-w-0 flex-1">
-          <button
-            type="button"
-            data-testid="today-task-open"
-            onClick={onOpenTask}
-            title={`Open "${task.name}"`}
-            className={cn(
-              "text-left text-sm font-medium leading-snug truncate hover:underline cursor-pointer focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring rounded-sm",
-              isDone ? "line-through text-muted-foreground" : "text-foreground",
-            )}
-          >
-            {task.name}
-          </button>
-          <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[11px]">
-            {task.categoryName ? (
-              <CategoryBadge
-                categoryName={task.categoryName}
-                categoryKey={task.categoryKey}
-                className="text-[10px] px-1.5 py-0"
-              />
-            ) : null}
+      <button
+        type="button"
+        data-testid="today-task-open"
+        onClick={onOpenTask}
+        title={`Open "${task.name}"`}
+        className={cn(
+          "min-w-0 flex-1 cursor-pointer truncate rounded-sm py-2 text-left text-sm font-medium leading-snug after:absolute after:inset-0 after:content-[''] hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+          isDone ? "line-through text-muted-foreground" : "text-foreground",
+        )}
+      >
+        {task.name}
+      </button>
 
-            {task.priority !== "medium" ? (
-              <span
-                className={cn(
-                  "inline-flex items-center rounded-sm px-1.5 py-0 border",
-                  priorityInfo.class,
-                )}
-              >
-                {priorityInfo.label}
-              </span>
-            ) : null}
-
+      <div className="flex shrink-0 items-center gap-1.5">
+        <span className="hidden sm:inline-flex">
+          <PriorityBadge priority={task.priority ?? "medium"} />
+        </span>
+        {isDone ? null : (
+          <span className="whitespace-nowrap">
             <DueDateBadge dueAt={task.dueAt} status={task.status} timezone={timezone} />
-            <FavoriteBadge isFavorite={task.isFavorite} />
-
-            <span
-              className={cn(
-                "inline-flex items-center gap-1 rounded-sm px-1.5 py-0 border",
-                badgeClass,
-              )}
-            >
-              {badgeIcon}
-              {badgeLabel}
-            </span>
-          </div>
-          {task.description ? (
-            <TaskNotes
-              variant="clamp"
-              clampLines={1}
-              text={task.description}
-              onOpen={onOpenTask}
-              className="mt-1.5"
-            />
-          ) : null}
-        </div>
+          </span>
+        )}
+        <FavoriteBadge isFavorite={task.isFavorite} />
       </div>
 
-      {/* Action buttons */}
-      <div className="flex items-center gap-1 shrink-0">
-        {!isDone ? (
-          <Button
-            type="button"
-            variant={isInProgress ? "secondary" : "outline"}
-            size="sm"
-            disabled={actionLoading}
-            onClick={onStartTimer}
-            className={cn(
-              "h-7 px-2.5 gap-1 text-xs font-medium transition-all active:scale-98",
-              isInProgress &&
-                "bg-blue-500/15 text-blue-700 dark:text-blue-300 border-blue-500/30",
-            )}
-            title={isInProgress ? "Timer already active" : `Start tracking "${task.name}"`}
-          >
-            {actionLoading ? (
-              <Loader2 className="size-3 animate-spin" />
-            ) : (
-              <Play className="size-3 fill-current" />
-            )}
-            <span className="hidden sm:inline">
-              {isInProgress ? "Tracking" : "Start"}
-            </span>
-          </Button>
-        ) : null}
-      </div>
+      {!isDone ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          disabled={actionLoading}
+          onClick={onStartTimer}
+          className={cn(
+            "relative z-10 size-10 shrink-0 transition-all active:scale-95 sm:size-9",
+            isInProgress && "bg-blue-500/15 text-blue-700 dark:text-blue-300",
+          )}
+          title={isInProgress ? "Timer already active" : `Start tracking "${task.name}"`}
+          aria-label={isInProgress ? `Tracking "${task.name}"` : `Start tracking "${task.name}"`}
+        >
+          {actionLoading ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Play className="size-4 fill-current" />
+          )}
+        </Button>
+      ) : null}
     </div>
   );
 }
